@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>간단 번역기</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1c1e21; --muted:#6b7280; --line:#d9dce1; --accent:#3b6cf6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16181d; --card:#20232a; --text:#e8eaed; --muted:#9aa0a6; --line:#3a3e47; --accent:#6d93ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--text);
+         font-family: -apple-system, "Segoe UI", "Malgun Gothic", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 16px; }
+  .bar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  select, button { font: inherit; padding: 8px 10px; border:1px solid var(--line); border-radius:8px;
+                   background:var(--card); color:var(--text); }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; padding:8px 20px; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .panes { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  @media (max-width: 640px) { .panes { grid-template-columns: 1fr; } }
+  .pane { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px; display:flex; flex-direction:column; }
+  textarea, .out { width:100%; min-height:220px; border:none; outline:none; resize:vertical; background:transparent;
+                   color:var(--text); font: inherit; line-height:1.5; }
+  .out { white-space:pre-wrap; word-break:break-word; }
+  .out.empty { color:var(--muted); }
+  .foot { display:flex; justify-content:space-between; align-items:center; color:var(--muted); font-size:.85rem; margin-top:6px; min-height:30px; }
+  .err { color:#d93025; margin-top:10px; min-height:1.2em; font-size:.9rem; }
+  small.note { display:block; margin-top:14px; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>간단 번역기</h1>
+
+  <div class="bar">
+    <select id="from" aria-label="원문 언어"></select>
+    <button id="swap" title="언어 바꾸기" aria-label="언어 바꾸기">⇄</button>
+    <select id="to" aria-label="번역 언어"></select>
+    <button id="go" class="primary">번역</button>
+  </div>
+
+  <div class="panes">
+    <div class="pane">
+      <textarea id="src" placeholder="번역할 텍스트를 입력하세요 (Ctrl+Enter로 번역)" maxlength="5000"></textarea>
+      <div class="foot"><span id="count">0 / 5000</span><button id="clear">지우기</button></div>
+    </div>
+    <div class="pane">
+      <div id="dst" class="out empty">번역 결과가 여기에 표시됩니다.</div>
+      <div class="foot"><span></span><button id="copy">복사</button></div>
+    </div>
+  </div>
+
+  <div id="err" class="err" role="alert"></div>
+  <small class="note">MyMemory 무료 번역 API를 사용합니다(인터넷 연결 필요, 일일 사용량 제한 있음).</small>
+</main>
+
+<script>
+const LANGS = {
+  ko:"한국어", en:"영어", ja:"일본어", zh:"중국어(간체)", es:"스페인어",
+  fr:"프랑스어", de:"독일어", ru:"러시아어", vi:"베트남어", th:"태국어"
+};
+const $ = id => document.getElementById(id);
+const from = $("from"), to = $("to"), src = $("src"), dst = $("dst"),
+      go = $("go"), err = $("err");
+
+from.innerHTML = '<option value="autodetect">언어 감지</option>' +
+  Object.entries(LANGS).map(([k,v]) => `<option value="${k}">${v}</option>`).join("");
+to.innerHTML = Object.entries(LANGS).map(([k,v]) => `<option value="${k}">${v}</option>`).join("");
+from.value = "autodetect"; to.value = "en";
+
+// 긴 글은 API 제한(약 500자)에 맞춰 문장 단위로 쪼갭니다.
+function chunk(text, max = 450) {
+  const parts = text.match(/[^.!?。！？\n]+[.!?。！？]*\s*|\n+/g) || [text];
+  const out = []; let cur = "";
+  for (const p of parts) {
+    if ((cur + p).length > max && cur) { out.push(cur); cur = ""; }
+    if (p.length > max) { for (let i = 0; i < p.length; i += max) out.push(p.slice(i, i + max)); }
+    else cur += p;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+async function translateChunk(text, f, t) {
+  if (!text.trim()) return text;           // 공백/줄바꿈은 그대로
+  const url = "https://api.mymemory.translated.net/get?q=" + encodeURIComponent(text) +
+              "&langpair=" + encodeURIComponent(f + "|" + t);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("서버 오류 (" + res.status + ")");
+  const data = await res.json();
+  if (data.responseStatus !== 200) throw new Error(data.responseDetails || "번역에 실패했습니다.");
+  return data.responseData.translatedText;
+}
+
+async function translate() {
+  const text = src.value;
+  err.textContent = "";
+  if (!text.trim()) { err.textContent = "번역할 텍스트를 입력해 주세요."; return; }
+  if (from.value === to.value) { err.textContent = "원문과 번역 언어가 같습니다."; return; }
+  go.disabled = true; go.textContent = "번역 중…";
+  try {
+    const results = [];
+    for (const c of chunk(text)) results.push(await translateChunk(c, from.value, to.value));
+    dst.textContent = results.join("");
+    dst.classList.remove("empty");
+  } catch (e) {
+    err.textContent = "오류: " + e.message;
+  } finally {
+    go.disabled = false; go.textContent = "번역";
+  }
+}
+
+go.onclick = translate;
+src.addEventListener("keydown", e => { if (e.ctrlKey && e.key === "Enter") translate(); });
+src.addEventListener("input", () => { $("count").textContent = src.value.length + " / 5000"; });
+$("clear").onclick = () => { src.value = ""; $("count").textContent = "0 / 5000"; dst.textContent = "번역 결과가 여기에 표시됩니다."; dst.classList.add("empty"); err.textContent = ""; src.focus(); };
+$("swap").onclick = () => {
+  const f = from.value === "autodetect" ? to.value : from.value;
+  const t = to.value;
+  from.value = t; to.value = f;
+  if (!dst.classList.contains("empty")) { src.value = dst.textContent; $("count").textContent = src.value.length + " / 5000"; }
+};
+$("copy").onclick = async () => {
+  if (dst.classList.contains("empty")) return;
+  try { await navigator.clipboard.writeText(dst.textContent); $("copy").textContent = "복사됨 ✓"; }
+  catch { err.textContent = "복사에 실패했습니다."; }
+  setTimeout(() => $("copy").textContent = "복사", 1200);
+};
+</script>
+</body>
+</html>
